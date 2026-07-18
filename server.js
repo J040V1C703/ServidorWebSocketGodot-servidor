@@ -3,7 +3,6 @@ const WebSocket = require("ws");
 const { v4: uuidv4 } = require("uuid");
 
 const app = express();
-
 const PORT = process.env.PORT || 9090;
 
 const server = app.listen(PORT, () => {
@@ -12,565 +11,298 @@ const server = app.listen(PORT, () => {
 
 const wss = new WebSocket.Server({ server });
 
-
 const rooms = new Map();
-
 const MAX_PLAYERS_PER_ROOM = 5;
 
-
-
 function generateRoomCode(length = 5) {
-
 	const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-
 	let result = "";
-
 	for (let i = 0; i < length; i++) {
-		result += chars[Math.floor(Math.random() * chars.length)];
+		result += chars.charAt(Math.floor(Math.random() * chars.length));
 	}
-
 	return result;
 }
 
-
-
 const playerlist = {
-
 	players: [],
 
+	get(uuid) {
+		return this.players.find((player) => player.uuid === uuid);
+	},
 
-	add(uuid, room) {
+	getByRoom(roomCode) {
+		return this.players.filter((player) => player.room === roomCode);
+	},
 
-		const players = this.getByRoom(room);
-
-		const first = players.length === 0;
-
+	add(uuid, roomCode) {
+		const playersInRoom = this.getByRoom(roomCode);
+		const isFirstPlayer = playersInRoom.length === 0;
+		const playerIndex = playersInRoom.length + 1;
 
 		const player = {
-
 			uuid: uuid,
-
-			room: room,
-
-			x: first ? 550 : 700,
-
-			y: 300
-
+			room: roomCode,
+			player_index: playerIndex,
+			x: isFirstPlayer ? 550 : 700,
+			y: 300,
+			anim: "idle_down",
+			flip_h: false,
+			shield: false,
+			attacking: false
 		};
 
-
 		this.players.push(player);
-
 		return player;
-
 	},
 
-
-	get(uuid) {
-
-		return this.players.find(p => p.uuid === uuid);
-
-	},
-
-
-	update(uuid, x, y) {
-
+	update(uuid, patch) {
 		const player = this.get(uuid);
-
-		if(player){
-
-			player.x = x;
-			player.y = y;
-
+		if (player) {
+			Object.assign(player, patch);
 		}
-
 	},
 
-
-	remove(uuid){
-
-		this.players =
-		this.players.filter(p => p.uuid !== uuid);
-
-	},
-
-
-	getByRoom(room){
-
-		return this.players.filter(p => p.room === room);
-
+	remove(uuid) {
+		this.players = this.players.filter((player) => player.uuid !== uuid);
 	}
-
 };
 
-
-
-
-wss.on("connection", socket => {
-
-
+wss.on("connection", (socket) => {
 	const uuid = uuidv4();
-
 	socket.uuid = uuid;
-
 
 	console.log("Cliente conectado:", uuid);
 
-
-
 	socket.send(JSON.stringify({
-
-		cmd:"joined_server",
-
-		content:{
-			uuid:uuid
-		}
-
+		cmd: "joined_server",
+		content: { uuid: uuid }
 	}));
 
-
-
-
-
-	socket.on("message", message => {
-
-
+	socket.on("message", (message) => {
 		let data;
 
-
-		try{
-
+		try {
 			data = JSON.parse(message.toString());
-
-		}catch(e){
-
-			console.log("JSON inválido");
-
+		} catch (err) {
+			console.error("Erro ao parsear mensagem:", err);
 			return;
-
 		}
 
-
-
-
-		switch(data.cmd){
-
-
-
-			case "create_room":
-
-
+		switch (data.cmd) {
+			case "create_room": {
 				const roomCode = generateRoomCode();
-
-
 				socket.roomId = roomCode;
 
-
-				rooms.set(roomCode,{
-
-					players:{}
-
+				rooms.set(roomCode, {
+					players: {}
 				});
-
 
 				rooms.get(roomCode).players[uuid] = socket;
 
-
-
-				const player = playerlist.add(uuid, roomCode);
-
-
+				const newPlayer = playerlist.add(uuid, roomCode);
 
 				console.log("Sala criada:", roomCode);
 
-
-
 				socket.send(JSON.stringify({
-
-					cmd:"room_created",
-
-					content:{
-						code:roomCode
-					}
-
+					cmd: "room_created",
+					content: { code: roomCode }
 				}));
 
-
 				socket.send(JSON.stringify({
-
-					cmd:"spawn_local_player",
-
-					content:{
-						player:player
-					}
-
+					cmd: "spawn_local_player",
+					content: { player: newPlayer }
 				}));
 
-
 				socket.send(JSON.stringify({
-
-					cmd:"start_game",
-
-					content:{}
-
+					cmd: "start_game",
+					content: {}
 				}));
 
+				break;
+			}
 
-			break;
+			case "join_room": {
+				const roomCode = String(data.content.code || "").toUpperCase();
+				const roomToJoin = rooms.get(roomCode);
 
-
-
-
-
-			case "join_room":
-
-
-				const code = data.content.code.toUpperCase();
-
-
-				const room = rooms.get(code);
-
-
-
-				if(!room){
-
+				if (!roomToJoin) {
 					socket.send(JSON.stringify({
-
-						cmd:"error",
-
-						content:{
-							msg:"Sala não encontrada"
-						}
-
+						cmd: "error",
+						content: { msg: "Sala não encontrada." }
 					}));
-
 					return;
-
 				}
 
-
-
-
-				if(Object.keys(room.players).length >= MAX_PLAYERS_PER_ROOM){
-
-
+				if (Object.keys(roomToJoin.players).length >= MAX_PLAYERS_PER_ROOM) {
 					socket.send(JSON.stringify({
-
-						cmd:"error",
-
-						content:{
-							msg:"Sala cheia"
-						}
-
+						cmd: "error",
+						content: { msg: "Sala cheia. Limite de 5 jogadores." }
 					}));
-
 					return;
-
 				}
 
+				socket.roomId = roomCode;
+				roomToJoin.players[uuid] = socket;
 
+				const newPlayer = playerlist.add(uuid, roomCode);
 
-
-
-				socket.roomId = code;
-
-
-				room.players[uuid] = socket;
-
-
-
-				const newPlayer = playerlist.add(uuid, code);
-
-
-
-				console.log("Jogador entrou:", uuid);
-
-
-
-
+				console.log("Jogador entrou:", uuid, "na sala", roomCode);
 
 				socket.send(JSON.stringify({
-
-					cmd:"room_joined",
-
-					content:{
-						code:code
-					}
-
+					cmd: "room_joined",
+					content: { code: roomCode }
 				}));
-
-
-
-
 
 				socket.send(JSON.stringify({
-
-					cmd:"spawn_local_player",
-
-					content:{
-						player:newPlayer
-					}
-
+					cmd: "spawn_local_player",
+					content: { player: newPlayer }
 				}));
 
-
-
-
-
-				const oldPlayers = playerlist
-				.getByRoom(code)
-				.filter(p=>p.uuid !== uuid);
-
-
+				const roomPlayers = playerlist
+					.getByRoom(roomCode)
+					.filter((p) => p.uuid !== uuid);
 
 				socket.send(JSON.stringify({
-
-					cmd:"spawn_network_players",
-
-					content:{
-						players:oldPlayers
-					}
-
+					cmd: "spawn_network_players",
+					content: { players: roomPlayers }
 				}));
 
-
-
-
-
-				for(const id in room.players){
-
-
-					const client = room.players[id];
-
-
-					if(client !== socket &&
-					client.readyState === WebSocket.OPEN){
-
-
+				for (const clientUuid in roomToJoin.players) {
+					const client = roomToJoin.players[clientUuid];
+					if (client !== socket && client.readyState === WebSocket.OPEN) {
 						client.send(JSON.stringify({
-
-							cmd:"spawn_new_player",
-
-							content:{
-								player:newPlayer
-							}
-
+							cmd: "spawn_new_player",
+							content: { player: newPlayer }
 						}));
-
 					}
-
 				}
 
-
-
-
-				for(const id in room.players){
-
-
-					const client = room.players[id];
-
-
-					if(client.readyState === WebSocket.OPEN){
-
-
+				for (const clientUuid in roomToJoin.players) {
+					const client = roomToJoin.players[clientUuid];
+					if (client.readyState === WebSocket.OPEN) {
 						client.send(JSON.stringify({
-
-							cmd:"start_game",
-
-							content:{}
-
+							cmd: "start_game",
+							content: {}
 						}));
-
-
 					}
-
 				}
 
+				break;
+			}
 
-			break;
+			case "player_state": {
+				const state = {
+					x: Number(data.content.x) || 0,
+					y: Number(data.content.y) || 0,
+					anim: String(data.content.anim || "idle_down"),
+					flip_h: !!data.content.flip_h,
+					shield: !!data.content.shield,
+					attacking: !!data.content.attacking,
+					player_index: Number(data.content.player_index) || 1
+				};
 
+				playerlist.update(uuid, state);
 
-
-
-
-
-			case "position":
-
-
-				playerlist.update(
-
-					uuid,
-
-					data.content.x,
-
-					data.content.y
-
-				);
-
-
-
-				const playerRoom = rooms.get(socket.roomId);
-
-
-
-				if(playerRoom){
-
-
-					for(const id in playerRoom.players){
-
-
-						const client = playerRoom.players[id];
-
-
-						if(client !== socket &&
-						client.readyState === WebSocket.OPEN){
-
-
+				const room = rooms.get(socket.roomId);
+				if (room) {
+					for (const clientUuid in room.players) {
+						const client = room.players[clientUuid];
+						if (client !== socket && client.readyState === WebSocket.OPEN) {
 							client.send(JSON.stringify({
-
-								cmd:"update_position",
-
-								content:{
-
-									uuid:uuid,
-
-									x:data.content.x,
-
-									y:data.content.y
-
+								cmd: "player_state",
+								content: {
+									uuid: uuid,
+									...state
 								}
-
 							}));
-
 						}
-
 					}
-
 				}
 
+				break;
+			}
 
-			break;
+			case "position": {
+				const state = {
+					x: Number(data.content.x) || 0,
+					y: Number(data.content.y) || 0
+				};
 
+				playerlist.update(uuid, state);
 
-
-
-
-			case "chat":
-
-
-				const chatRoom = rooms.get(socket.roomId);
-
-
-				if(chatRoom){
-
-
-					for(const id in chatRoom.players){
-
-
-						const client = chatRoom.players[id];
-
-
-						if(client.readyState === WebSocket.OPEN){
-
-
+				const room = rooms.get(socket.roomId);
+				if (room) {
+					for (const clientUuid in room.players) {
+						const client = room.players[clientUuid];
+						if (client !== socket && client.readyState === WebSocket.OPEN) {
 							client.send(JSON.stringify({
-
-								cmd:"new_chat_message",
-
-								content:{
-
-									uuid:uuid,
-
-									msg:data.content.msg
-
+								cmd: "player_state",
+								content: {
+									uuid: uuid,
+									x: state.x,
+									y: state.y,
+									anim: "idle_down",
+									flip_h: false,
+									shield: false,
+									attacking: false,
+									player_index: 1
 								}
-
 							}));
-
 						}
-
 					}
-
 				}
 
+				break;
+			}
 
-			break;
+			case "chat": {
+				const room = rooms.get(socket.roomId);
+				if (room) {
+					for (const clientUuid in room.players) {
+						const client = room.players[clientUuid];
+						if (client.readyState === WebSocket.OPEN) {
+							client.send(JSON.stringify({
+								cmd: "new_chat_message",
+								content: {
+									uuid: uuid,
+									msg: data.content.msg
+								}
+							}));
+						}
+					}
+				}
+				break;
+			}
 
-
-
+			default:
+				console.log("Comando desconhecido:", data.cmd);
+				break;
 		}
-
-
-
 	});
 
-
-
-
-
-
-	socket.on("close",()=>{
-
-
-		console.log("Saiu:",uuid);
-
-
+	socket.on("close", () => {
+		console.log("Cliente desconectado:", uuid);
 
 		playerlist.remove(uuid);
 
-
-
 		const room = rooms.get(socket.roomId);
-
-
-
-		if(room){
-
-
+		if (room) {
 			delete room.players[uuid];
 
-
-
-			for(const id in room.players){
-
-
-				const client = room.players[id];
-
-
-				if(client.readyState === WebSocket.OPEN){
-
-
+			for (const clientUuid in room.players) {
+				const client = room.players[clientUuid];
+				if (client.readyState === WebSocket.OPEN) {
 					client.send(JSON.stringify({
-
-						cmd:"player_disconnected",
-
-						content:{
-							uuid:uuid
-						}
-
+						cmd: "player_disconnected",
+						content: { uuid: uuid }
 					}));
-
 				}
-
 			}
 
-
-
-
-			if(Object.keys(room.players).length === 0){
-
+			if (Object.keys(room.players).length === 0) {
 				rooms.delete(socket.roomId);
-
-				console.log("Sala removida");
-
+				console.log("Sala removida:", socket.roomId);
 			}
-
-
 		}
-
-
-
 	});
-
-
 });
