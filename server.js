@@ -23,6 +23,14 @@ function generateRoomCode(length = 5) {
 	return result;
 }
 
+function generateUniqueRoomCode() {
+	let code = generateRoomCode();
+	while (rooms.has(code)) {
+		code = generateRoomCode();
+	}
+	return code;
+}
+
 const playerlist = {
 	players: [],
 
@@ -80,7 +88,6 @@ wss.on("connection", (socket) => {
 
 	socket.on("message", (message) => {
 		let data;
-
 		try {
 			data = JSON.parse(message.toString());
 		} catch (err) {
@@ -90,7 +97,7 @@ wss.on("connection", (socket) => {
 
 		switch (data.cmd) {
 			case "create_room": {
-				const roomCode = generateRoomCode();
+				const roomCode = generateUniqueRoomCode();
 				socket.roomId = roomCode;
 
 				rooms.set(roomCode, {
@@ -191,6 +198,15 @@ wss.on("connection", (socket) => {
 			}
 
 			case "player_state": {
+				if (!socket.roomId) {
+					break;
+				}
+
+				const room = rooms.get(socket.roomId);
+				if (!room) {
+					break;
+				}
+
 				const state = {
 					x: Number(data.content.x) || 0,
 					y: Number(data.content.y) || 0,
@@ -203,19 +219,16 @@ wss.on("connection", (socket) => {
 
 				playerlist.update(uuid, state);
 
-				const room = rooms.get(socket.roomId);
-				if (room) {
-					for (const clientUuid in room.players) {
-						const client = room.players[clientUuid];
-						if (client !== socket && client.readyState === WebSocket.OPEN) {
-							client.send(JSON.stringify({
-								cmd: "player_state",
-								content: {
-									uuid: uuid,
-									...state
-								}
-							}));
-						}
+				for (const clientUuid in room.players) {
+					const client = room.players[clientUuid];
+					if (client !== socket && client.readyState === WebSocket.OPEN) {
+						client.send(JSON.stringify({
+							cmd: "player_state",
+							content: {
+								uuid: uuid,
+								...state
+							}
+						}));
 					}
 				}
 
@@ -223,32 +236,37 @@ wss.on("connection", (socket) => {
 			}
 
 			case "position": {
+				if (!socket.roomId) {
+					break;
+				}
+
+				const room = rooms.get(socket.roomId);
+				if (!room) {
+					break;
+				}
+
 				const state = {
 					x: Number(data.content.x) || 0,
-					y: Number(data.content.y) || 0
+					y: Number(data.content.y) || 0,
+					anim: "idle_down",
+					flip_h: false,
+					shield: false,
+					attacking: false,
+					player_index: 1
 				};
 
 				playerlist.update(uuid, state);
 
-				const room = rooms.get(socket.roomId);
-				if (room) {
-					for (const clientUuid in room.players) {
-						const client = room.players[clientUuid];
-						if (client !== socket && client.readyState === WebSocket.OPEN) {
-							client.send(JSON.stringify({
-								cmd: "player_state",
-								content: {
-									uuid: uuid,
-									x: state.x,
-									y: state.y,
-									anim: "idle_down",
-									flip_h: false,
-									shield: false,
-									attacking: false,
-									player_index: 1
-								}
-							}));
-						}
+				for (const clientUuid in room.players) {
+					const client = room.players[clientUuid];
+					if (client !== socket && client.readyState === WebSocket.OPEN) {
+						client.send(JSON.stringify({
+							cmd: "player_state",
+							content: {
+								uuid: uuid,
+								...state
+							}
+						}));
 					}
 				}
 
@@ -256,21 +274,28 @@ wss.on("connection", (socket) => {
 			}
 
 			case "chat": {
+				if (!socket.roomId) {
+					break;
+				}
+
 				const room = rooms.get(socket.roomId);
-				if (room) {
-					for (const clientUuid in room.players) {
-						const client = room.players[clientUuid];
-						if (client.readyState === WebSocket.OPEN) {
-							client.send(JSON.stringify({
-								cmd: "new_chat_message",
-								content: {
-									uuid: uuid,
-									msg: data.content.msg
-								}
-							}));
-						}
+				if (!room) {
+					break;
+				}
+
+				for (const clientUuid in room.players) {
+					const client = room.players[clientUuid];
+					if (client.readyState === WebSocket.OPEN) {
+						client.send(JSON.stringify({
+							cmd: "new_chat_message",
+							content: {
+								uuid: uuid,
+								msg: data.content.msg
+							}
+						}));
 					}
 				}
+
 				break;
 			}
 
