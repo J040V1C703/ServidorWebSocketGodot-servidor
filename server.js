@@ -31,6 +31,16 @@ function generateUniqueRoomCode() {
 	return code;
 }
 
+function normalizeNick(nick) {
+	return String(nick || "").trim();
+}
+
+function normalizeColorIndex(value) {
+	const n = Number(value);
+	if (Number.isNaN(n)) return 0;
+	return Math.max(0, Math.min(31, Math.floor(n)));
+}
+
 const playerlist = {
 	players: [],
 
@@ -42,15 +52,15 @@ const playerlist = {
 		return this.players.filter((player) => player.room === roomCode);
 	},
 
-	add(uuid, roomCode) {
+	add(uuid, roomCode, nickname, player_index) {
 		const playersInRoom = this.getByRoom(roomCode);
 		const isFirstPlayer = playersInRoom.length === 0;
-		const playerIndex = playersInRoom.length + 1;
 
 		const player = {
 			uuid: uuid,
 			room: roomCode,
-			player_index: playerIndex,
+			player_index: normalizeColorIndex(player_index),
+			nickname: normalizeNick(nickname) || "Player",
 			x: isFirstPlayer ? 550 : 700,
 			y: 300,
 			anim: "idle_down",
@@ -74,6 +84,23 @@ const playerlist = {
 		this.players = this.players.filter((player) => player.uuid !== uuid);
 	}
 };
+
+function roomHasNickname(roomCode, nickname, ignoreUuid = "") {
+	const nick = normalizeNick(nickname).toLowerCase();
+	if (nick === "") return false;
+
+	return playerlist.getByRoom(roomCode).some((p) => {
+		return p.uuid !== ignoreUuid && String(p.nickname || "").toLowerCase() === nick;
+	});
+}
+
+function roomHasColor(roomCode, playerIndex, ignoreUuid = "") {
+	const idx = normalizeColorIndex(playerIndex);
+
+	return playerlist.getByRoom(roomCode).some((p) => {
+		return p.uuid !== ignoreUuid && normalizeColorIndex(p.player_index) === idx;
+	});
+}
 
 wss.on("connection", (socket) => {
 	const uuid = uuidv4();
@@ -106,7 +133,10 @@ wss.on("connection", (socket) => {
 
 				rooms.get(roomCode).players[uuid] = socket;
 
-				const newPlayer = playerlist.add(uuid, roomCode);
+				const nickname = normalizeNick(data.content.nickname) || "Player";
+				const player_index = normalizeColorIndex(data.content.player_index);
+
+				const newPlayer = playerlist.add(uuid, roomCode, nickname, player_index);
 
 				console.log("Sala criada:", roomCode);
 
@@ -135,15 +165,34 @@ wss.on("connection", (socket) => {
 				if (!roomToJoin) {
 					socket.send(JSON.stringify({
 						cmd: "error",
-						content: { msg: "Sala não encontrada." }
+						content: { type: "room_not_found", msg: "Sala não encontrada." }
 					}));
 					return;
 				}
 
+				const nickname = normalizeNick(data.content.nickname) || "Player";
+				const player_index = normalizeColorIndex(data.content.player_index);
+
 				if (Object.keys(roomToJoin.players).length >= MAX_PLAYERS_PER_ROOM) {
 					socket.send(JSON.stringify({
 						cmd: "error",
-						content: { msg: "Sala cheia. Limite de 5 jogadores." }
+						content: { type: "room_full", msg: "Sala cheia. Limite de 5 jogadores." }
+					}));
+					return;
+				}
+
+				if (roomHasNickname(roomCode, nickname)) {
+					socket.send(JSON.stringify({
+						cmd: "error",
+						content: { type: "nickname_taken", msg: "Nick já escolhido." }
+					}));
+					return;
+				}
+
+				if (roomHasColor(roomCode, player_index)) {
+					socket.send(JSON.stringify({
+						cmd: "error",
+						content: { type: "color_taken", msg: "Cor já selecionada." }
 					}));
 					return;
 				}
@@ -151,7 +200,7 @@ wss.on("connection", (socket) => {
 				socket.roomId = roomCode;
 				roomToJoin.players[uuid] = socket;
 
-				const newPlayer = playerlist.add(uuid, roomCode);
+				const newPlayer = playerlist.add(uuid, roomCode, nickname, player_index);
 
 				console.log("Jogador entrou:", uuid, "na sala", roomCode);
 
@@ -198,14 +247,10 @@ wss.on("connection", (socket) => {
 			}
 
 			case "player_state": {
-				if (!socket.roomId) {
-					break;
-				}
+				if (!socket.roomId) break;
 
 				const room = rooms.get(socket.roomId);
-				if (!room) {
-					break;
-				}
+				if (!room) break;
 
 				const state = {
 					x: Number(data.content.x) || 0,
@@ -214,7 +259,8 @@ wss.on("connection", (socket) => {
 					flip_h: !!data.content.flip_h,
 					shield: !!data.content.shield,
 					attacking: !!data.content.attacking,
-					player_index: Number(data.content.player_index) || 1
+					player_index: Number(data.content.player_index) || 0,
+					nickname: normalizeNick(data.content.nickname) || "Player"
 				};
 
 				playerlist.update(uuid, state);
@@ -236,61 +282,25 @@ wss.on("connection", (socket) => {
 			}
 
 			case "position": {
-				if (!socket.roomId) {
-					break;
-				}
+				if (!socket.roomId) break;
 
 				const room = rooms.get(socket.roomId);
-				if (!room) {
-					break;
-				}
+				if (!room) break;
 
-				const state = {
+				playerlist.update(uuid, {
 					x: Number(data.content.x) || 0,
-					y: Number(data.content.y) || 0,
-					anim: "idle_down",
-					flip_h: false,
-					shield: false,
-					attacking: false,
-					player_index: 1
-				};
-
-				playerlist.update(uuid, state);
+					y: Number(data.content.y) || 0
+				});
 
 				for (const clientUuid in room.players) {
 					const client = room.players[clientUuid];
 					if (client !== socket && client.readyState === WebSocket.OPEN) {
 						client.send(JSON.stringify({
-							cmd: "player_state",
+							cmd: "update_position",
 							content: {
 								uuid: uuid,
-								...state
-							}
-						}));
-					}
-				}
-
-				break;
-			}
-
-			case "chat": {
-				if (!socket.roomId) {
-					break;
-				}
-
-				const room = rooms.get(socket.roomId);
-				if (!room) {
-					break;
-				}
-
-				for (const clientUuid in room.players) {
-					const client = room.players[clientUuid];
-					if (client.readyState === WebSocket.OPEN) {
-						client.send(JSON.stringify({
-							cmd: "new_chat_message",
-							content: {
-								uuid: uuid,
-								msg: data.content.msg
+								x: Number(data.content.x) || 0,
+								y: Number(data.content.y) || 0
 							}
 						}));
 					}
