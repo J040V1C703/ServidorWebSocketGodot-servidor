@@ -20,6 +20,7 @@ const MAX_PLAYERS_PER_ROOM = 5;
 
 const ROOM_TICK_MS = 50;
 const ZORD_DURATION_MS = 30000;
+const ZORD_COOLDOWN_MS = 60000;
 const MEGAZORD_DURATION_MS = 60000;
 const MEGAZORD_DASH_SPEED = 1200;
 const MEGAZORD_DASH_TIME = 180;
@@ -104,6 +105,7 @@ const playerlist = {
 			attacking: false,
 			mode: "normal",
 			zord_expires_at: 0,
+			zord_cooldown_until: 0,
 			megazord_input: {
 				left: false,
 				right: false,
@@ -284,16 +286,12 @@ function sendRoomStateToJoiner(socket, room, localUuid) {
 	});
 
 	if (room.megazord.active) {
-		send(socket, "megazord_active", {
-			active: true
-		});
-
+		send(socket, "megazord_active", { active: true });
 		send(socket, "spawn_megazord", {
 			x: room.megazord.x,
 			y: room.megazord.y,
 			duration: MEGAZORD_DURATION_MS
 		});
-
 		send(socket, "megazord_state", {
 			x: room.megazord.x,
 			y: room.megazord.y,
@@ -301,7 +299,6 @@ function sendRoomStateToJoiner(socket, room, localUuid) {
 			flip_h: room.megazord.flipH,
 			attacking: room.megazord.attacking
 		});
-
 		send(socket, "teleport_players", {
 			x: room.megazord.x,
 			y: room.megazord.y
@@ -344,9 +341,7 @@ function spawnMegazord(room) {
 		duration: MEGAZORD_DURATION_MS
 	});
 
-	broadcastRoom(room, "megazord_active", {
-		active: true
-	});
+	broadcastRoom(room, "megazord_active", { active: true });
 
 	broadcastRoom(room, "megazord_state", {
 		x: room.megazord.x,
@@ -393,9 +388,7 @@ function endMegazord(room) {
 		y: finalY
 	});
 
-	broadcastRoom(room, "megazord_active", {
-		active: false
-	});
+	broadcastRoom(room, "megazord_active", { active: false });
 
 	for (const p of players) {
 		broadcastRoom(room, "player_mode", {
@@ -416,6 +409,7 @@ function updateZordTimeouts(room) {
 		if (p.mode === "zord" && p.zord_expires_at && t >= p.zord_expires_at) {
 			p.mode = "normal";
 			p.zord_expires_at = 0;
+			p.zord_cooldown_until = now() + ZORD_COOLDOWN_MS;
 
 			broadcastRoom(room, "player_mode", {
 				uuid: p.uuid,
@@ -466,17 +460,12 @@ function updateMegazord(room) {
 		room.megazord.attackUntil = t + MEGAZORD_ATTACK_TIME;
 		room.megazord.attackCooldownUntil = t + MEGAZORD_ATTACK_COOLDOWN;
 
-		broadcastRoom(room, "megazord_attack", {
-			attack: true
-		});
+		broadcastRoom(room, "megazord_attack", { attack: true });
 	}
 
 	if (room.megazord.attacking && t >= room.megazord.attackUntil) {
 		room.megazord.attacking = false;
-
-		broadcastRoom(room, "megazord_attack", {
-			attack: false
-		});
+		broadcastRoom(room, "megazord_attack", { attack: false });
 	}
 
 	broadcastRoom(room, "megazord_state", {
@@ -509,13 +498,8 @@ function removePlayerFromRoom(socket) {
 	delete room.players[uuid];
 	playerlist.remove(uuid);
 
-	broadcastRoom(room, "player_disconnected", {
-		uuid: uuid
-	});
-
-	broadcastRoom(room, "remove_player", {
-		uuid: uuid
-	});
+	broadcastRoom(room, "player_disconnected", { uuid: uuid });
+	broadcastRoom(room, "remove_player", { uuid: uuid });
 
 	if (room.creatorUuid === uuid) {
 		const remaining = playerlist.getByRoom(roomCode);
@@ -544,9 +528,7 @@ wss.on("connection", (socket) => {
 
 	console.log("Cliente conectado:", uuid);
 
-	send(socket, "joined_server", {
-		uuid: uuid
-	});
+	send(socket, "joined_server", { uuid: uuid });
 
 	socket.on("message", (message) => {
 		let data;
@@ -578,12 +560,8 @@ wss.on("connection", (socket) => {
 
 				console.log("Sala criada:", room.code);
 
-				send(socket, "room_created", {
-					code: room.code
-				});
-
+				send(socket, "room_created", { code: room.code });
 				sendRoomStateToJoiner(socket, room, uuid);
-
 				send(socket, "start_game", {});
 				break;
 			}
@@ -634,10 +612,7 @@ wss.on("connection", (socket) => {
 
 				console.log("Jogador entrou:", uuid, "na sala", roomCode);
 
-				send(socket, "room_joined", {
-					code: roomCode
-				});
-
+				send(socket, "room_joined", { code: roomCode });
 				sendRoomStateToJoiner(socket, room, uuid);
 
 				broadcastRoom(room, "spawn_new_player", {
@@ -667,6 +642,13 @@ wss.on("connection", (socket) => {
 				if (!player) break;
 
 				if (player.mode === "zord") break;
+				if (player.zord_cooldown_until && now() < player.zord_cooldown_until) {
+					send(socket, "error", {
+						type: "zord_cooldown",
+						msg: "Zord em recarga."
+					});
+					return;
+				}
 
 				player.mode = "zord";
 				player.zord_expires_at = now() + ZORD_DURATION_MS;
@@ -695,6 +677,7 @@ wss.on("connection", (socket) => {
 
 				player.mode = "normal";
 				player.zord_expires_at = 0;
+				player.zord_cooldown_until = now() + ZORD_COOLDOWN_MS;
 
 				broadcastRoom(room, "player_mode", {
 					uuid: player.uuid,
