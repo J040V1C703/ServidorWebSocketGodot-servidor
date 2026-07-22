@@ -1,878 +1,1585 @@
+// ========================================
+// SERVIDOR WEBSOCKET GODOT 4
+// PARTE 1/4
+// ========================================
+
 const express = require("express");
 const WebSocket = require("ws");
 const { v4: uuidv4 } = require("uuid");
 
 const app = express();
+
 const PORT = process.env.PORT || 9090;
 
-app.get("/", (_req, res) => {
-	res.send("Servidor WebSocket Godot online");
+
+app.get("/", (req, res) => {
+	res.send("Servidor WebSocket online");
 });
+
 
 const server = app.listen(PORT, () => {
-	console.log("Servidor iniciado na porta: " + PORT);
+	console.log(
+		"Servidor iniciado na porta:",
+		PORT
+	);
 });
 
-const wss = new WebSocket.Server({ server });
+
+const wss = new WebSocket.Server({
+	server
+});
+
+
+// ========================================
+// CONFIGURAÇÕES
+// ========================================
+
+const MAX_PLAYERS = 5;
+
+const ZORD_DURATION = 30000;
+const ZORD_COOLDOWN = 60000;
+
+const MEGAZORD_DURATION = 60000;
+
+const TICK_RATE = 50;
+
+
+// ========================================
+// SALAS
+// ========================================
 
 const rooms = new Map();
-const MAX_PLAYERS_PER_ROOM = 5;
 
-const ROOM_TICK_MS = 50;
-const ZORD_DURATION_MS = 30000;
-const ZORD_COOLDOWN_MS = 60000;
-const MEGAZORD_DURATION_MS = 60000;
-const MEGAZORD_DASH_SPEED = 1200;
-const MEGAZORD_DASH_TIME = 180;
-const MEGAZORD_DASH_COOLDOWN = 250;
-const MEGAZORD_ATTACK_COOLDOWN = 800;
-const MEGAZORD_ATTACK_TIME = 300;
 
-function now() {
-	return Date.now();
+// ========================================
+// FUNÇÕES DE ENVIO
+// ========================================
+
+function send(socket, type, data = {}) {
+
+	if (!socket)
+		return;
+
+
+	if(socket.readyState !== WebSocket.OPEN)
+		return;
+
+
+	socket.send(JSON.stringify({
+
+		type:type,
+
+		data:data
+
+	}));
+
 }
 
-function send(socket, cmd, content = {}) {
-	if (!socket || socket.readyState !== WebSocket.OPEN) return;
-	socket.send(JSON.stringify({ cmd, content }));
+
+
+function broadcast(room, type, data = {}, except = "") {
+
+
+	if(!room)
+		return;
+
+
+	for(const id in room.players){
+
+
+		if(id === except)
+			continue;
+
+
+		const client = room.players[id];
+
+
+		send(
+			client,
+			type,
+			data
+		);
+
+	}
+
 }
 
-function broadcastRoom(room, cmd, content = {}, exceptUuid = "") {
-	if (!room || !room.players) return;
 
-	for (const clientUuid in room.players) {
-		if (exceptUuid && clientUuid === exceptUuid) continue;
 
-		const client = room.players[clientUuid];
-		if (client && client.readyState === WebSocket.OPEN) {
-			send(client, cmd, content);
+function sendMessage(room, text){
+
+	broadcast(
+		room,
+		"chat",
+		{
+			message:text,
+			system:true
 		}
-	}
+	);
+
 }
 
-function sendSystemMessage(room, text) {
-	broadcastRoom(room, "system_message", {
-		text: text
-	});
-}
 
-function generateRoomCode(length = 5) {
-	const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+// ========================================
+// CÓDIGOS DE SALA
+// ========================================
+
+function createRoomCode(){
+
+
+	const chars =
+		"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+
 	let result = "";
-	for (let i = 0; i < length; i++) {
-		result += chars.charAt(Math.floor(Math.random() * chars.length));
+
+
+	for(let i = 0; i < 5; i++){
+
+		result += chars[
+			Math.floor(
+				Math.random()*chars.length
+			)
+		];
+
 	}
+
+
 	return result;
+
 }
 
-function generateUniqueRoomCode() {
-	let code = generateRoomCode();
-	while (rooms.has(code)) {
-		code = generateRoomCode();
+
+
+function uniqueRoomCode(){
+
+	let code;
+
+
+	do{
+
+		code = createRoomCode();
+
 	}
+	while(rooms.has(code));
+
+
 	return code;
+
 }
 
-function normalizeNick(nick) {
-	return String(nick || "").trim();
+
+
+// ========================================
+// NORMALIZAÇÃO
+// ========================================
+
+function normalizeName(value){
+
+	return String(value || "")
+		.trim();
+
 }
 
-function normalizeColorIndex(value) {
-	const n = Number(value);
-	if (Number.isNaN(n)) return 0;
-	return Math.max(0, Math.min(31, Math.floor(n)));
+
+
+function normalizeIndex(value){
+
+	let number =
+		Number(value);
+
+
+	if(Number.isNaN(number))
+		number = 0;
+
+
+	return Math.max(
+		0,
+		Math.min(
+			31,
+			Math.floor(number)
+		)
+	);
+
 }
 
-const playerlist = {
-	players: [],
 
-	get(uuid) {
-		return this.players.find((player) => player.uuid === uuid);
+
+// ========================================
+// PLAYER DATABASE
+// ========================================
+
+const players = {
+
+
+	list: [],
+
+
+
+	get(uuid){
+
+		return this.list.find(
+			p => p.uuid === uuid
+		);
+
 	},
 
-	getByRoom(roomCode) {
-		return this.players.filter((player) => player.room === roomCode);
+
+
+	getRoom(room){
+
+		return this.list.filter(
+			p => p.room === room
+		);
+
 	},
 
-	add(uuid, roomCode, nickname, player_index) {
-		const playersInRoom = this.getByRoom(roomCode);
-		const isFirstPlayer = playersInRoom.length === 0;
+
+
+	add(uuid, room, data){
+
 
 		const player = {
-			uuid: uuid,
-			room: roomCode,
-			player_index: normalizeColorIndex(player_index),
-			nickname: normalizeNick(nickname) || "Player",
-			x: isFirstPlayer ? 550 : 700,
-			y: 300,
-			anim: "idle_down",
-			flip_h: false,
-			shield: false,
-			attacking: false,
-			mode: "normal",
-			zord_expires_at: 0,
-			zord_cooldown_until: 0,
-			megazord_input: {
-				left: false,
-				right: false,
-				up: false,
-				down: false,
-				attack: false
+
+
+			uuid:uuid,
+
+			room:room,
+
+
+			nickname:
+				normalizeName(data.nickname)
+				|| "Player",
+
+
+
+			player_index:
+				normalizeIndex(
+					data.player_index
+				),
+
+
+
+			x:550,
+
+			y:300,
+
+
+
+			anim:"idle_down",
+
+			flip_h:false,
+
+
+
+			shield:false,
+
+			attacking:false,
+
+
+
+			mode:"player",
+
+
+
+			zord_time:0,
+
+			zord_cooldown:0,
+
+
+
+			megazord_input:{
+
+
+				left:false,
+
+				right:false,
+
+				up:false,
+
+				down:false,
+
+				attack:false
+
 			}
+
+
 		};
 
-		this.players.push(player);
+
+
+		this.list.push(player);
+
+
 		return player;
+
 	},
 
-	update(uuid, patch) {
-		const player = this.get(uuid);
-		if (player) {
-			Object.assign(player, patch);
+
+
+	update(uuid,data){
+
+
+		const player =
+			this.get(uuid);
+
+
+
+		if(player){
+
+			Object.assign(
+				player,
+				data
+			);
+
 		}
+
+
 	},
 
-	remove(uuid) {
-		this.players = this.players.filter((player) => player.uuid !== uuid);
+
+
+	remove(uuid){
+
+
+		this.list =
+			this.list.filter(
+				p => p.uuid !== uuid
+			);
+
+
 	}
+
+
 };
 
-function roomHasNickname(roomCode, nickname, ignoreUuid = "") {
-	const nick = normalizeNick(nickname).toLowerCase();
-	if (nick === "") return false;
 
-	return playerlist.getByRoom(roomCode).some((p) => {
-		return p.uuid !== ignoreUuid && String(p.nickname || "").toLowerCase() === nick;
-	});
-}
 
-function roomHasColor(roomCode, playerIndex, ignoreUuid = "") {
-	const idx = normalizeColorIndex(playerIndex);
+// ========================================
+// CRIAÇÃO DE SALA
+// ========================================
 
-	return playerlist.getByRoom(roomCode).some((p) => {
-		return p.uuid !== ignoreUuid && normalizeColorIndex(p.player_index) === idx;
-	});
-}
+function createRoom(){
 
-function getRoomPlayerCount(room) {
-	return Object.keys(room.players || {}).length;
-}
 
-function allPlayersInZord(room) {
-	const players = playerlist.getByRoom(room.code);
-	if (players.length < 2) return false;
-	return players.every((p) => p.mode === "zord");
-}
+	const code =
+		uniqueRoomCode();
 
-function allPlayersAttack(room) {
-	const players = playerlist.getByRoom(room.code);
-	if (players.length === 0) return false;
-	return players.every((p) => p.megazord_input && p.megazord_input.attack === true);
-}
 
-function getConsensusDirection(room) {
-	const players = playerlist.getByRoom(room.code);
-	if (players.length === 0) return "";
-
-	let consensus = "";
-
-	for (const p of players) {
-		const input = p.megazord_input || {};
-		let dir = "";
-
-		if (input.left) dir = "left";
-		else if (input.right) dir = "right";
-		else if (input.up) dir = "up";
-		else if (input.down) dir = "down";
-
-		if (dir === "") return "";
-		if (consensus === "") consensus = dir;
-		else if (consensus !== dir) return "";
-	}
-
-	return consensus;
-}
-
-function directionVector(dir) {
-	switch (dir) {
-		case "left": return { x: -1, y: 0 };
-		case "right": return { x: 1, y: 0 };
-		case "up": return { x: 0, y: -1 };
-		case "down": return { x: 0, y: 1 };
-		default: return { x: 0, y: 0 };
-	}
-}
-
-function ensureRoomTick(room) {
-	if (room.tickHandle) return;
-
-	room.tickHandle = setInterval(() => {
-		tickRoom(room);
-	}, ROOM_TICK_MS);
-}
-
-function clearRoomTick(room) {
-	if (room && room.tickHandle) {
-		clearInterval(room.tickHandle);
-		room.tickHandle = null;
-	}
-}
-
-function createRoom() {
-	const roomCode = generateUniqueRoomCode();
 
 	const room = {
-		code: roomCode,
-		players: {},
-		creatorUuid: "",
-		spawnX: 0,
-		spawnY: 0,
-		megazord: {
-			active: false,
-			x: 0,
-			y: 0,
-			dashDir: "",
-			dashUntil: 0,
-			dashCooldownUntil: 0,
-			attackUntil: 0,
-			attackCooldownUntil: 0,
-			endsAt: 0,
-			flipH: false,
-			anim: "idle_down",
-			attacking: false
-		},
-		tickHandle: null
+
+
+		code:code,
+
+
+		players:{},
+
+
+
+		creator:"",
+
+
+
+		megazord:{
+
+
+			active:false,
+
+
+			x:0,
+
+			y:0,
+
+
+			anim:"idle_down",
+
+			flip:false,
+
+
+			attacking:false,
+
+
+			endTime:0
+
+
+		}
+
+
+
 	};
 
-	rooms.set(roomCode, room);
-	ensureRoomTick(room);
+
+
+	rooms.set(
+		code,
+		room
+	);
+
+
+
 	return room;
+
 }
+// ========================================
+// CONEXÃO DOS CLIENTES
+// ========================================
 
-function setRoomCreator(room, newCreatorUuid) {
-	room.creatorUuid = newCreatorUuid || "";
+wss.on("connection", (socket)=>{
 
-	if (!room.creatorUuid) {
-		room.spawnX = 0;
-		room.spawnY = 0;
-		return;
-	}
 
-	const creatorPlayer = playerlist.get(room.creatorUuid);
-	if (creatorPlayer) {
-		room.spawnX = creatorPlayer.x;
-		room.spawnY = creatorPlayer.y;
-	}
-}
-
-function buildPlayerPayload(player, isLocal = false) {
-	return {
-		...player,
-		is_local: isLocal
-	};
-}
-
-function buildRoomPlayersPayload(room, localUuid = "") {
-	return playerlist.getByRoom(room.code).map((p) => buildPlayerPayload(p, p.uuid === localUuid));
-}
-
-function sendRoomStateToJoiner(socket, room, localUuid) {
-	const players = buildRoomPlayersPayload(room, localUuid);
-
-	send(socket, "room_players", {
-		players: players
-	});
-
-	send(socket, "spawn_network_players", {
-		players: players.filter((p) => p.uuid !== localUuid)
-	});
-
-	send(socket, "spawn_local_player", {
-		player: players.find((p) => p.uuid === localUuid) || {}
-	});
-
-	if (room.megazord.active) {
-		send(socket, "megazord_active", {
-			active: true
-		});
-
-		send(socket, "spawn_megazord", {
-			x: room.megazord.x,
-			y: room.megazord.y,
-			duration: MEGAZORD_DURATION_MS
-		});
-
-		send(socket, "megazord_state", {
-			x: room.megazord.x,
-			y: room.megazord.y,
-			anim: room.megazord.anim,
-			flip_h: room.megazord.flipH,
-			attacking: room.megazord.attacking
-		});
-
-		send(socket, "teleport_players", {
-			x: room.megazord.x,
-			y: room.megazord.y
-		});
-	}
-}
-
-function spawnMegazord(room) {
-	if (!room || room.megazord.active) return;
-
-	const players = playerlist.getByRoom(room.code);
-	if (players.length === 0) return;
-
-	room.megazord.active = true;
-	room.megazord.x = room.spawnX;
-	room.megazord.y = room.spawnY;
-	room.megazord.dashDir = "";
-	room.megazord.dashUntil = 0;
-	room.megazord.dashCooldownUntil = 0;
-	room.megazord.attackUntil = 0;
-	room.megazord.attackCooldownUntil = 0;
-	room.megazord.endsAt = now() + MEGAZORD_DURATION_MS;
-	room.megazord.flipH = false;
-	room.megazord.anim = "idle_down";
-	room.megazord.attacking = false;
-
-	for (const p of players) {
-		p.x = room.spawnX;
-		p.y = room.spawnY;
-	}
-
-	sendSystemMessage(room, "O Megazord foi formado.");
-
-	broadcastRoom(room, "teleport_players", {
-		x: room.spawnX,
-		y: room.spawnY
-	});
-
-	broadcastRoom(room, "spawn_megazord", {
-		x: room.spawnX,
-		y: room.spawnY,
-		duration: MEGAZORD_DURATION_MS
-	});
-
-	broadcastRoom(room, "megazord_active", {
-		active: true
-	});
-
-	broadcastRoom(room, "megazord_state", {
-		x: room.megazord.x,
-		y: room.megazord.y,
-		anim: room.megazord.anim,
-		flip_h: room.megazord.flipH,
-		attacking: room.megazord.attacking
-	});
-}
-
-function endMegazord(room) {
-	if (!room || !room.megazord.active) return;
-
-	const finalX = room.megazord.x;
-	const finalY = room.megazord.y;
-
-	room.megazord.active = false;
-	room.megazord.dashDir = "";
-	room.megazord.attacking = false;
-
-	const players = playerlist.getByRoom(room.code);
-	for (const p of players) {
-		p.x = finalX;
-		p.y = finalY;
-		p.mode = "normal";
-		p.zord_expires_at = 0;
-		p.zord_cooldown_until = now() + ZORD_COOLDOWN_MS;
-	}
-
-	broadcastRoom(room, "megazord_state", {
-		x: finalX,
-		y: finalY,
-		anim: room.megazord.anim,
-		flip_h: room.megazord.flipH,
-		attacking: false
-	});
-
-	broadcastRoom(room, "despawn_megazord", {
-		x: finalX,
-		y: finalY
-	});
-
-	broadcastRoom(room, "teleport_players", {
-		x: finalX,
-		y: finalY
-	});
-
-	broadcastRoom(room, "megazord_active", {
-		active: false
-	});
-
-	for (const p of players) {
-		broadcastRoom(room, "player_mode", {
-			uuid: p.uuid,
-			mode: "normal",
-			player_data: buildPlayerPayload(p, false)
-		});
-	}
-}
-
-function updateZordTimeouts(room) {
-	if (room.megazord.active) return;
-
-	const t = now();
-	const players = playerlist.getByRoom(room.code);
-
-	for (const p of players) {
-		if (p.mode === "zord" && p.zord_expires_at && t >= p.zord_expires_at) {
-			p.mode = "normal";
-			p.zord_expires_at = 0;
-			p.zord_cooldown_until = now() + ZORD_COOLDOWN_MS;
-
-			broadcastRoom(room, "player_mode", {
-				uuid: p.uuid,
-				mode: "normal",
-				player_data: buildPlayerPayload(p, false)
-			});
-		}
-	}
-}
-
-function updateMegazord(room) {
-	if (!room.megazord.active) return;
-
-	const t = now();
-
-	if (t >= room.megazord.endsAt) {
-		endMegazord(room);
-		return;
-	}
-
-	const dir = getConsensusDirection(room);
-
-	if (dir && t >= room.megazord.dashCooldownUntil) {
-		room.megazord.dashDir = dir;
-		room.megazord.dashUntil = t + MEGAZORD_DASH_TIME;
-		room.megazord.dashCooldownUntil = t + MEGAZORD_DASH_COOLDOWN;
-	}
-
-	if (room.megazord.dashDir && t < room.megazord.dashUntil) {
-		const v = directionVector(room.megazord.dashDir);
-		const dt = ROOM_TICK_MS / 1000;
-		room.megazord.x += v.x * MEGAZORD_DASH_SPEED * dt;
-		room.megazord.y += v.y * MEGAZORD_DASH_SPEED * dt;
-
-		if (v.x !== 0) {
-			room.megazord.flipH = v.x > 0;
-			room.megazord.anim = "walk_left";
-		} else if (v.y !== 0) {
-			room.megazord.anim = v.y > 0 ? "walk_down" : "walk_up";
-		}
-	} else {
-		room.megazord.dashDir = "";
-		room.megazord.anim = "idle_down";
-	}
-
-	if (allPlayersAttack(room) && t >= room.megazord.attackCooldownUntil) {
-		room.megazord.attacking = true;
-		room.megazord.attackUntil = t + MEGAZORD_ATTACK_TIME;
-		room.megazord.attackCooldownUntil = t + MEGAZORD_ATTACK_COOLDOWN;
-
-		broadcastRoom(room, "megazord_attack", {
-			attack: true
-		});
-	}
-
-	if (room.megazord.attacking && t >= room.megazord.attackUntil) {
-		room.megazord.attacking = false;
-
-		broadcastRoom(room, "megazord_attack", {
-			attack: false
-		});
-	}
-
-	broadcastRoom(room, "megazord_state", {
-		x: room.megazord.x,
-		y: room.megazord.y,
-		anim: room.megazord.anim,
-		flip_h: room.megazord.flipH,
-		attacking: room.megazord.attacking
-	});
-}
-
-function tickRoom(room) {
-	updateZordTimeouts(room);
-
-	if (!room.megazord.active && allPlayersInZord(room)) {
-		spawnMegazord(room);
-	}
-
-	updateMegazord(room);
-}
-
-function removePlayerFromRoom(socket) {
-	const uuid = socket.uuid;
-	const roomCode = socket.roomId;
-	if (!uuid || !roomCode) return;
-
-	const room = rooms.get(roomCode);
-	if (!room) return;
-
-	const player = playerlist.get(uuid);
-	const playerName = player ? player.nickname : "Um jogador";
-
-	delete room.players[uuid];
-	playerlist.remove(uuid);
-
-	broadcastRoom(room, "player_disconnected", {
-		uuid: uuid
-	});
-
-	broadcastRoom(room, "remove_player", {
-		uuid: uuid
-	});
-
-	sendSystemMessage(room, `"${playerName}" saiu do jogo.`);
-
-	if (room.creatorUuid === uuid) {
-		const remaining = playerlist.getByRoom(roomCode);
-		if (remaining.length > 0) {
-			setRoomCreator(room, remaining[0].uuid);
-		} else {
-			room.creatorUuid = "";
-			room.spawnX = 0;
-			room.spawnY = 0;
-		}
-	}
-
-	if (Object.keys(room.players).length === 0) {
-		clearRoomTick(room);
-		rooms.delete(roomCode);
-		console.log("Sala removida:", roomCode);
-	}
-
-	socket.roomId = "";
-}
-
-wss.on("connection", (socket) => {
 	const uuid = uuidv4();
+
+
 	socket.uuid = uuid;
+
+
 	socket.roomId = "";
 
-	console.log("Cliente conectado:", uuid);
 
-	send(socket, "joined_server", {
-		uuid: uuid
-	});
 
-	socket.on("message", (message) => {
-		let data;
-		try {
-			data = JSON.parse(message.toString());
-		} catch (err) {
-			console.error("Erro ao parsear mensagem:", err);
-			send(socket, "error", {
-				type: "bad_json",
-				msg: "JSON inválido."
-			});
+	console.log(
+		"Cliente conectado:",
+		uuid
+	);
+
+
+
+	send(
+		socket,
+		"connected",
+		{
+			uuid:uuid
+		}
+	);
+
+
+
+
+
+// ========================================
+// RECEBIMENTO DE MENSAGENS
+// ========================================
+
+	socket.on("message",(raw)=>{
+
+
+		let msg;
+
+
+		try{
+
+
+			msg =
+				JSON.parse(
+					raw.toString()
+				);
+
+
+		}
+		catch(e){
+
+
+			console.log(
+				"JSON inválido"
+			);
+
+
 			return;
+
 		}
 
-		switch (data.cmd) {
-			case "create_room": {
-				const room = createRoom();
-				socket.roomId = room.code;
 
-				room.players[uuid] = socket;
 
-				const nickname = normalizeNick(data.content?.nickname) || "Player";
-				const player_index = normalizeColorIndex(data.content?.player_index);
+		const type =
+			String(
+				msg.type || ""
+			);
 
-				const newPlayer = playerlist.add(uuid, room.code, nickname, player_index);
-				setRoomCreator(room, uuid);
-				room.spawnX = newPlayer.x;
-				room.spawnY = newPlayer.y;
 
-				console.log("Sala criada:", room.code);
 
-				send(socket, "room_created", { code: room.code });
-				sendRoomStateToJoiner(socket, room, uuid);
-				send(socket, "start_game", {});
+		const data =
+			msg.data || {};
 
-				sendSystemMessage(room, `"${newPlayer.nickname}" entrou no jogo.`);
-				break;
-			}
 
-			case "join_room": {
-				const roomCode = String(data.content?.code || "").toUpperCase();
-				const room = rooms.get(roomCode);
 
-				if (!room) {
-					send(socket, "error", {
-						type: "room_not_found",
-						msg: "Sala não encontrada."
-					});
-					return;
+
+
+		switch(type){
+
+
+
+// ========================================
+// CRIAR SALA
+// ========================================
+
+		case "create_room":{
+
+
+			const room =
+				createRoom();
+
+
+
+			socket.roomId =
+				room.code;
+
+
+
+			room.players[uuid] =
+				socket;
+
+
+
+			room.creator =
+				uuid;
+
+
+
+
+			const player =
+				players.add(
+					uuid,
+					room.code,
+					data
+				);
+
+
+
+			send(
+				socket,
+				"room_created",
+				{
+					code:room.code
 				}
+			);
 
-				if (getRoomPlayerCount(room) >= MAX_PLAYERS_PER_ROOM) {
-					send(socket, "error", {
-						type: "room_full",
-						msg: "Sala cheia. Limite de 5 jogadores."
-					});
-					return;
+
+
+
+			send(
+				socket,
+				"spawn_player",
+				{
+					player:player,
+					local:true
 				}
+			);
 
-				const nickname = normalizeNick(data.content?.nickname) || "Player";
-				const player_index = normalizeColorIndex(data.content?.player_index);
 
-				if (roomHasNickname(roomCode, nickname)) {
-					send(socket, "error", {
-						type: "nickname_taken",
-						msg: "Nick já escolhido."
-					});
-					return;
-				}
 
-				if (roomHasColor(roomCode, player_index)) {
-					send(socket, "error", {
-						type: "color_taken",
-						msg: "Cor já selecionada."
-					});
-					return;
-				}
+			sendMessage(
+				room,
+				player.nickname+
+				" entrou no jogo"
+			);
 
-				socket.roomId = roomCode;
-				room.players[uuid] = socket;
 
-				const newPlayer = playerlist.add(uuid, roomCode, nickname, player_index);
 
-				console.log("Jogador entrou:", uuid, "na sala", roomCode);
+			send(
+				socket,
+				"start_game"
+			);
 
-				send(socket, "room_joined", { code: roomCode });
-				sendRoomStateToJoiner(socket, room, uuid);
 
-				broadcastRoom(room, "spawn_new_player", {
-					player: buildPlayerPayload(newPlayer, false)
-				}, uuid);
 
-				broadcastRoom(room, "spawn_player", {
-					player: buildPlayerPayload(newPlayer, false)
-				}, uuid);
+			console.log(
+				"Sala criada:",
+				room.code
+			);
 
-				broadcastRoom(room, "start_game", {});
 
-				sendSystemMessage(room, `"${newPlayer.nickname}" entrou no jogo.`);
-				break;
-			}
 
-			case "leave_room": {
-				removePlayerFromRoom(socket);
-				break;
-			}
+			break;
 
-			case "request_zord": {
-				if (!socket.roomId) break;
+		}
 
-				const room = rooms.get(socket.roomId);
-				if (!room) break;
 
-				const player = playerlist.get(uuid);
-				if (!player) break;
 
-				if (player.mode === "zord") break;
-				if (player.zord_cooldown_until && now() < player.zord_cooldown_until) {
-					send(socket, "error", {
-						type: "zord_cooldown",
-						msg: "Zord em recarga."
-					});
-					return;
-				}
 
-				player.mode = "zord";
-				player.zord_expires_at = now() + ZORD_DURATION_MS;
+// ========================================
+// ENTRAR NA SALA
+// ========================================
 
-				broadcastRoom(room, "player_mode", {
-					uuid: player.uuid,
-					mode: "zord",
-					player_data: buildPlayerPayload(player, false)
-				});
+		case "join_room":{
 
-				sendSystemMessage(room, `"${player.nickname}" chamou o zord.`);
 
-				if (!room.megazord.active && allPlayersInZord(room)) {
-					spawnMegazord(room);
-				}
+			const code =
+				String(
+					data.code || ""
+				)
+				.toUpperCase();
 
-				break;
-			}
 
-			case "zord_finished": {
-				if (!socket.roomId) break;
 
-				const room = rooms.get(socket.roomId);
-				if (!room) break;
+			const room =
+				rooms.get(code);
 
-				const player = playerlist.get(uuid);
-				if (!player) break;
 
-				player.mode = "normal";
-				player.zord_expires_at = 0;
-				player.zord_cooldown_until = now() + ZORD_COOLDOWN_MS;
 
-				broadcastRoom(room, "player_mode", {
-					uuid: player.uuid,
-					mode: "normal",
-					player_data: buildPlayerPayload(player, false)
-				});
+			if(!room){
 
-				break;
-			}
 
-			case "player_state": {
-				if (!socket.roomId) break;
-
-				const room = rooms.get(socket.roomId);
-				if (!room) break;
-
-				const state = {
-					x: Number(data.content?.x) || 0,
-					y: Number(data.content?.y) || 0,
-					anim: String(data.content?.anim || "idle_down"),
-					flip_h: !!data.content?.flip_h,
-					shield: !!data.content?.shield,
-					attacking: !!data.content?.attacking,
-					player_index: Number(data.content?.player_index) || 0,
-					nickname: normalizeNick(data.content?.nickname) || "Player"
-				};
-
-				const player = playerlist.get(uuid);
-				if (player) {
-					playerlist.update(uuid, state);
-
-					if (player.uuid === room.creatorUuid) {
-						room.spawnX = state.x;
-						room.spawnY = state.y;
+				send(
+					socket,
+					"server_error",
+					{
+						msg:"Sala não encontrada"
 					}
+				);
 
-					if (typeof data.content?.mode === "string") {
-						if (data.content.mode === "normal" || data.content.mode === "zord") {
-							player.mode = data.content.mode;
-						}
+
+				break;
+
+			}
+
+
+
+
+
+			const count =
+				Object.keys(
+					room.players
+				).length;
+
+
+
+
+			if(count >= MAX_PLAYERS){
+
+
+				send(
+					socket,
+					"server_error",
+					{
+						msg:"Sala cheia"
 					}
-				}
+				);
 
-				broadcastRoom(room, "player_state", {
-					uuid: uuid,
+
+				break;
+
+			}
+
+
+
+
+			socket.roomId =
+				code;
+
+
+
+			room.players[uuid] =
+				socket;
+
+
+
+
+			const player =
+				players.add(
+					uuid,
+					code,
+					data
+				);
+
+
+
+
+			send(
+				socket,
+				"room_joined",
+				{
+					code:code
+				}
+			);
+
+
+
+
+
+			// cria o jogador local
+
+			send(
+				socket,
+				"spawn_player",
+				{
+					player:player,
+					local:true
+				}
+			);
+
+
+
+
+
+			// envia jogadores existentes
+
+			const others =
+				players
+				.getRoom(code)
+				.filter(
+					p=>p.uuid !== uuid
+				);
+
+
+
+
+			send(
+				socket,
+				"room_players",
+				{
+					players:others
+				}
+			);
+
+
+
+
+
+			// avisa os outros
+
+			broadcast(
+				room,
+				"spawn_player",
+				{
+					player:player,
+					local:false
+				},
+				uuid
+			);
+
+
+
+
+
+			sendMessage(
+				room,
+				player.nickname+
+				" entrou no jogo"
+			);
+
+
+
+			send(
+				socket,
+				"start_game"
+			);
+
+
+
+			break;
+
+		}
+				// ========================================
+// ESTADO DO JOGADOR
+// ========================================
+
+		case "player_state": {
+
+
+			if(!socket.roomId)
+				break;
+
+
+
+			const room =
+				rooms.get(
+					socket.roomId
+				);
+
+
+
+			if(!room)
+				break;
+
+
+
+
+			const player =
+				players.get(uuid);
+
+
+
+			if(!player)
+				break;
+
+
+
+
+			const state = {
+
+
+				x:
+					Number(data.x) || player.x,
+
+
+				y:
+					Number(data.y) || player.y,
+
+
+
+				anim:
+					String(
+						data.anim ||
+						player.anim
+					),
+
+
+
+				flip_h:
+					!!data.flip_h,
+
+
+
+				shield:
+					!!data.shield,
+
+
+
+				attacking:
+					!!data.attacking,
+
+
+
+				player_index:
+					normalizeIndex(
+						data.player_index
+					)
+
+			};
+
+
+
+
+
+			const oldShield =
+				player.shield;
+
+
+
+			players.update(
+				uuid,
+				state
+			);
+
+
+
+
+			if(!oldShield && state.shield){
+
+
+				sendMessage(
+					room,
+					player.nickname+
+					" pegou o escudo"
+				);
+
+			}
+
+
+
+
+			broadcast(
+				room,
+				"player_state",
+				{
+					uuid:uuid,
 					...state
-				}, uuid);
+				},
+				uuid
+			);
 
-				broadcastRoom(room, "update_position", {
-					uuid: uuid,
-					x: state.x,
-					y: state.y
-				}, uuid);
 
+
+			break;
+
+		}
+
+
+
+
+
+// ========================================
+// POSIÇÃO SIMPLES
+// ========================================
+
+		case "position": {
+
+
+			if(!socket.roomId)
 				break;
-			}
 
-			case "zord_state": {
-				if (!socket.roomId) break;
 
-				const room = rooms.get(socket.roomId);
-				if (!room) break;
 
-				const player = playerlist.get(uuid);
-				if (!player) break;
+			const room =
+				rooms.get(
+					socket.roomId
+				);
 
-				playerlist.update(uuid, {
-					x: Number(data.content?.x) || 0,
-					y: Number(data.content?.y) || 0,
-					anim: String(data.content?.anim || "idle_down"),
-					flip_h: !!data.content?.flip_h,
-					attacking: !!data.content?.attacking
-				});
 
-				broadcastRoom(room, "zord_state", {
-					uuid: uuid,
-					x: Number(data.content?.x) || 0,
-					y: Number(data.content?.y) || 0,
-					anim: String(data.content?.anim || "idle_down"),
-					flip_h: !!data.content?.flip_h,
-					attacking: !!data.content?.attacking,
-					player_index: Number(data.content?.player_index) || 0,
-					nickname: normalizeNick(data.content?.nickname) || "Player"
-				}, uuid);
 
+			if(!room)
 				break;
-			}
 
-			case "player_event": {
-				if (!socket.roomId) break;
 
-				const room = rooms.get(socket.roomId);
-				if (!room) break;
 
-				const player = playerlist.get(uuid);
-				if (!player) break;
-
-				const event = String(data.content?.event || "");
-
-				if (event === "shield_picked") {
-					player.shield = true;
-
-					broadcastRoom(room, "player_state", {
-						uuid: uuid,
-						x: player.x,
-						y: player.y,
-						anim: player.anim,
-						flip_h: player.flip_h,
-						shield: true,
-						attacking: player.attacking,
-						player_index: player.player_index,
-						nickname: player.nickname
-					}, uuid);
-
-					sendSystemMessage(room, `"${player.nickname}" pegou o escudo.`);
+			players.update(
+				uuid,
+				{
+					x:Number(data.x)||0,
+					y:Number(data.y)||0
 				}
+			);
 
+
+
+
+			broadcast(
+				room,
+				"update_position",
+				{
+					uuid:uuid,
+					x:Number(data.x)||0,
+					y:Number(data.y)||0
+				},
+				uuid
+			);
+
+
+
+			break;
+
+		}
+
+
+
+
+
+// ========================================
+// CHAMAR ZORD
+// ========================================
+
+		case "spawn_zord": {
+
+
+			if(!socket.roomId)
 				break;
-			}
 
-			case "position": {
-				if (!socket.roomId) break;
 
-				const room = rooms.get(socket.roomId);
-				if (!room) break;
 
-				const x = Number(data.content?.x) || 0;
-				const y = Number(data.content?.y) || 0;
+			const room =
+				rooms.get(
+					socket.roomId
+				);
 
-				playerlist.update(uuid, { x, y });
 
-				const player = playerlist.get(uuid);
-				if (player && player.uuid === room.creatorUuid) {
-					room.spawnX = x;
-					room.spawnY = y;
+
+			const player =
+				players.get(uuid);
+
+
+
+			if(!room || !player)
+				break;
+
+
+
+
+			player.mode =
+				"zord";
+
+
+
+			player.zord_time =
+				Date.now()+
+				ZORD_DURATION;
+
+
+
+			sendMessage(
+				room,
+				player.nickname+
+				" chamou o Zord"
+			);
+
+
+
+			broadcast(
+				room,
+				"spawn_zord",
+				{
+					uuid:uuid,
+					x:player.x,
+					y:player.y,
+					player_index:
+						player.player_index,
+					nickname:
+						player.nickname
 				}
+			);
 
-				broadcastRoom(room, "update_position", {
-					uuid: uuid,
-					x: x,
-					y: y
-				}, uuid);
 
+
+			break;
+
+		}
+
+
+
+
+
+// ========================================
+// ESTADO DO ZORD
+// ========================================
+
+		case "zord_state": {
+
+
+			if(!socket.roomId)
 				break;
+
+
+
+			const room =
+				rooms.get(
+					socket.roomId
+				);
+
+
+
+			if(!room)
+				break;
+
+
+
+
+			broadcast(
+				room,
+				"zord_state",
+				{
+					uuid:uuid,
+					x:data.x,
+					y:data.y,
+					anim:data.anim,
+					flip_h:data.flip_h,
+					attack:data.attack
+				},
+				uuid
+			);
+
+
+
+			break;
+
+		}
+
+
+
+
+
+// ========================================
+// SAIR DO ZORD
+// ========================================
+
+		case "despawn_zord": {
+
+
+			if(!socket.roomId)
+				break;
+
+
+
+			const room =
+				rooms.get(
+					socket.roomId
+				);
+
+
+
+			const player =
+				players.get(uuid);
+
+
+
+			if(player)
+				player.mode="player";
+
+
+
+
+			broadcast(
+				room,
+				"despawn_zord",
+				{
+					uuid:uuid
+				}
+			);
+
+
+
+			break;
+
+		}
+		// ========================================
+// INPUT DO MEGAZORD
+// ========================================
+
+		case "megazord_input": {
+
+
+			if(!socket.roomId)
+				break;
+
+
+
+			const room =
+				rooms.get(
+					socket.roomId
+				);
+
+
+
+			if(!room)
+				break;
+
+
+
+
+			const player =
+				players.get(uuid);
+
+
+
+			if(!player)
+				break;
+
+
+
+
+			player.megazord_input = {
+
+
+				left:
+					!!data.left,
+
+
+				right:
+					!!data.right,
+
+
+				up:
+					!!data.up,
+
+
+				down:
+					!!data.down,
+
+
+				attack:
+					!!data.attack
+
+			};
+
+
+
+
+			broadcast(
+				room,
+				"megazord_input",
+				{
+					uuid:uuid,
+					input:
+						player.megazord_input
+				},
+				uuid
+			);
+
+
+
+			break;
+
+		}
+
+
+
+
+
+// ========================================
+// ESTADO DO MEGAZORD
+// ========================================
+
+		case "megazord_state": {
+
+
+			if(!socket.roomId)
+				break;
+
+
+
+			const room =
+				rooms.get(
+					socket.roomId
+				);
+
+
+
+			if(!room)
+				break;
+
+
+
+
+			room.megazord = {
+
+
+				active:true,
+
+
+				x:
+					Number(data.x)||0,
+
+
+				y:
+					Number(data.y)||0,
+
+
+				anim:
+					String(
+						data.anim||
+						"idle"
+					),
+
+
+				flip_h:
+					!!data.flip_h,
+
+
+				attacking:
+					!!data.attacking
+
+			};
+
+
+
+
+			broadcast(
+				room,
+				"megazord_state",
+				{
+					...room.megazord
+				},
+				uuid
+			);
+
+
+
+			break;
+
+		}
+
+
+
+
+
+// ========================================
+// ATIVA MEGAZORD
+// ========================================
+
+		case "spawn_megazord": {
+
+
+			if(!socket.roomId)
+				break;
+
+
+
+			const room =
+				rooms.get(
+					socket.roomId
+				);
+
+
+
+			if(!room)
+				break;
+
+
+
+			room.megazord.active =
+				true;
+
+
+
+			room.megazord.endTime =
+				Date.now()+
+				MEGAZORD_DURATION;
+
+
+
+
+			broadcast(
+				room,
+				"spawn_megazord",
+				{
+					players:
+						players.getRoom(
+							socket.roomId
+						)
+				}
+			);
+
+
+
+			break;
+
+		}
+
+
+
+
+
+// ========================================
+// DESTRUIR MEGAZORD
+// ========================================
+
+		case "despawn_megazord": {
+
+
+			if(!socket.roomId)
+				break;
+
+
+
+			const room =
+				rooms.get(
+					socket.roomId
+				);
+
+
+
+			if(room){
+
+				room.megazord.active =
+					false;
+
+
+				broadcast(
+					room,
+					"despawn_megazord",
+					{}
+				);
+
 			}
 
-			case "megazord_input": {
-				if (!socket.roomId) break;
 
-				const room = rooms.get(socket.roomId);
-				if (!room) break;
 
-				const player = playerlist.get(uuid);
-				if (!player) break;
+			break;
 
-				player.megazord_input = {
-					left: !!data.con
+		}
+
+
+
+
+
+// ========================================
+// ATAQUE DO MEGAZORD
+// ========================================
+
+		case "megazord_attack": {
+
+
+			if(!socket.roomId)
+				break;
+
+
+
+			const room =
+				rooms.get(
+					socket.roomId
+				);
+
+
+
+			broadcast(
+				room,
+				"megazord_attack",
+				{
+					uuid:uuid
+				}
+			);
+
+
+
+			break;
+
+		}
+
+
+
+
+
+// ========================================
+// CHAT
+// ========================================
+
+		case "chat": {
+
+
+			if(!socket.roomId)
+				break;
+
+
+
+			const room =
+				rooms.get(
+					socket.roomId
+				);
+
+
+
+			const player =
+				players.get(uuid);
+
+
+
+			if(!room || !player)
+				break;
+
+
+
+
+			broadcast(
+				room,
+				"chat",
+				{
+					message:
+						player.nickname+
+						": "+
+						String(
+							data.message||
+							""
+						),
+					system:false
+				}
+			);
+
+
+
+			break;
+
+		}
+
+
+
+
+
+// ========================================
+// DESCONHECIDO
+// ========================================
+
+		default:
+
+
+			console.log(
+				"Comando desconhecido:",
+				type
+			);
+
+
+			break;
+
+
+		}
+
+	});
+
+
+
+
+// ========================================
+// DESCONEXÃO
+// ========================================
+
+	socket.on("close",()=>{
+
+
+		console.log(
+			"Cliente saiu:",
+			uuid
+		);
+
+
+
+		const player =
+			players.get(uuid);
+
+
+
+		const room =
+			rooms.get(
+				socket.roomId
+			);
+
+
+
+		if(player && room){
+
+
+			sendMessage(
+				room,
+				player.nickname+
+				" saiu do jogo"
+			);
+
+
+
+			broadcast(
+				room,
+				"remove_player",
+				{
+					uuid:uuid
+				}
+			);
+
+
+
+		}
+
+
+
+		players.remove(uuid);
+
+
+
+		if(room){
+
+
+			delete room.players[uuid];
+
+
+
+			if(
+				Object.keys(room.players)
+				.length === 0
+			){
+
+				rooms.delete(
+					room.code
+				);
+
+
+				console.log(
+					"Sala removida:",
+					room.code
+				);
+
+			}
+
+		}
+
+
+	});
+
+
+});
