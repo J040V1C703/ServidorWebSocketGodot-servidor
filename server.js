@@ -50,6 +50,12 @@ function broadcastRoom(room, cmd, content = {}, exceptUuid = "") {
 	}
 }
 
+function sendSystemMessage(room, text) {
+	broadcastRoom(room, "system_message", {
+		text: text
+	});
+}
+
 function generateRoomCode(length = 5) {
 	const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 	let result = "";
@@ -335,6 +341,8 @@ function spawnMegazord(room) {
 		p.y = room.spawnY;
 	}
 
+	sendSystemMessage(room, "O Megazord foi formado.");
+
 	broadcastRoom(room, "teleport_players", {
 		x: room.spawnX,
 		y: room.spawnY
@@ -477,6 +485,7 @@ function updateMegazord(room) {
 
 	if (room.megazord.attacking && t >= room.megazord.attackUntil) {
 		room.megazord.attacking = false;
+
 		broadcastRoom(room, "megazord_attack", {
 			attack: false
 		});
@@ -509,6 +518,9 @@ function removePlayerFromRoom(socket) {
 	const room = rooms.get(roomCode);
 	if (!room) return;
 
+	const player = playerlist.get(uuid);
+	const playerName = player ? player.nickname : "Um jogador";
+
 	delete room.players[uuid];
 	playerlist.remove(uuid);
 
@@ -519,6 +531,8 @@ function removePlayerFromRoom(socket) {
 	broadcastRoom(room, "remove_player", {
 		uuid: uuid
 	});
+
+	sendSystemMessage(room, `"${playerName}" saiu do jogo.`);
 
 	if (room.creatorUuid === uuid) {
 		const remaining = playerlist.getByRoom(roomCode);
@@ -584,6 +598,8 @@ wss.on("connection", (socket) => {
 				send(socket, "room_created", { code: room.code });
 				sendRoomStateToJoiner(socket, room, uuid);
 				send(socket, "start_game", {});
+
+				sendSystemMessage(room, `"${newPlayer.nickname}" entrou no jogo.`);
 				break;
 			}
 
@@ -645,6 +661,8 @@ wss.on("connection", (socket) => {
 				}, uuid);
 
 				broadcastRoom(room, "start_game", {});
+
+				sendSystemMessage(room, `"${newPlayer.nickname}" entrou no jogo.`);
 				break;
 			}
 
@@ -679,6 +697,8 @@ wss.on("connection", (socket) => {
 					mode: "zord",
 					player_data: buildPlayerPayload(player, false)
 				});
+
+				sendSystemMessage(room, `"${player.nickname}" chamou o zord.`);
 
 				if (!room.megazord.active && allPlayersInZord(room)) {
 					spawnMegazord(room);
@@ -787,6 +807,38 @@ wss.on("connection", (socket) => {
 				break;
 			}
 
+			case "player_event": {
+				if (!socket.roomId) break;
+
+				const room = rooms.get(socket.roomId);
+				if (!room) break;
+
+				const player = playerlist.get(uuid);
+				if (!player) break;
+
+				const event = String(data.content?.event || "");
+
+				if (event === "shield_picked") {
+					player.shield = true;
+
+					broadcastRoom(room, "player_state", {
+						uuid: uuid,
+						x: player.x,
+						y: player.y,
+						anim: player.anim,
+						flip_h: player.flip_h,
+						shield: true,
+						attacking: player.attacking,
+						player_index: player.player_index,
+						nickname: player.nickname
+					}, uuid);
+
+					sendSystemMessage(room, `"${player.nickname}" pegou o escudo.`);
+				}
+
+				break;
+			}
+
 			case "position": {
 				if (!socket.roomId) break;
 
@@ -823,38 +875,4 @@ wss.on("connection", (socket) => {
 				if (!player) break;
 
 				player.megazord_input = {
-					left: !!data.content?.left,
-					right: !!data.content?.right,
-					up: !!data.content?.up,
-					down: !!data.content?.down,
-					attack: !!data.content?.attack
-				};
-
-				break;
-			}
-
-			case "chat": {
-				if (!socket.roomId) break;
-
-				const room = rooms.get(socket.roomId);
-				if (!room) break;
-
-				broadcastRoom(room, "chat", {
-					uuid: uuid,
-					msg: String(data.content?.msg || "")
-				});
-
-				break;
-			}
-
-			default:
-				console.log("Comando desconhecido:", data.cmd);
-				break;
-		}
-	});
-
-	socket.on("close", () => {
-		console.log("Cliente desconectado:", uuid);
-		removePlayerFromRoom(socket);
-	});
-});
+					left: !!data.con
